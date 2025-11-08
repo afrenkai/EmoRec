@@ -153,32 +153,38 @@ class PlaylistGenerator:
                         if track and track.get('spotify_id'):
                             seed_track_ids.append(track['spotify_id'])
             
-            # Prepare target audio features from emotion
-            target_features = {}
-            if emotion_features:
-                for key, value in emotion_features.items():
-                    if isinstance(value, (tuple, list)) and len(value) == 2:
-                        # Use midpoint of range
-                        target_features[f'target_{key}'] = (value[0] + value[1]) / 2
-                    else:
-                        target_features[f'target_{key}'] = value
-            
-                        # Get tracks from Spotify using search (recommendations API is deprecated)
+            # Get tracks from Spotify using search
             if seed_track_ids or songs:
-                logger.info("Searching for tracks similar to seed songs")
-                # Search for tracks related to the seed songs
+                logger.info("Searching for tracks with mood-based diversity (not just artist similarity)")
                 search_queries = []
                 
                 if songs:
-                    # Create search queries from seed songs
-                    for song in songs[:5]:
-                        search_queries.append(f"{song.song_name} {song.artist}")
-                        # Also search by artist to find similar tracks
-                        search_queries.append(song.artist)
+                    # If emotion is provided, use it to guide genre searches
+                    if emotion:
+                        logger.info(f"Using emotion '{emotion}' to guide mood-based search from seed songs")
+                        # Get genre queries for the emotion
+                        emotion_genres = self._get_genre_queries_for_emotion(emotion)
+                        # Add genre-based searches (this is the main source of diversity)
+                        for genre in emotion_genres[:4]:  # Use more genre queries
+                            search_queries.append(genre)
+                    else:
+                        # Without emotion, use broad genre searches for diversity
+                        logger.info("No emotion provided, using broad genre searches for diversity")
+                        search_queries.extend([
+                            "genre:indie",
+                            "genre:alternative",
+                            "genre:pop",
+                            "genre:electronic"
+                        ])
+                    
+                    # Add limited seed song queries (just the song names, not artists)
+                    # This provides some connection to seeds without clustering by artist
+                    for song in songs[:2]:  # Only use top 2 seeds
+                        search_queries.append(f"{song.song_name}")
                 
                 spotify_tracks = self.spotify_service.search_by_multiple_queries(
                     queries=search_queries,
-                    limit_per_query=15
+                    limit_per_query=20  # Get diverse results per query
                 )
                 
             elif emotion:
@@ -196,28 +202,15 @@ class PlaylistGenerator:
             else:
                 spotify_tracks = []
             
-            # Get audio features for all tracks
+            # Process tracks and compute similarity scores
             if spotify_tracks:
-                track_ids = [t['spotify_id'] for t in spotify_tracks if t.get('spotify_id')]
-                
-                # Try to get audio features, but continue without them if not available
-                try:
-                    tracks_with_features = self.spotify_service.get_tracks_with_features(track_ids)
-                except Exception as e:
-                    logger.warning(f"Could not get audio features (API may be restricted): {e}")
-                    tracks_with_features = spotify_tracks  # Use tracks without features
-                
-                # If no tracks with features, use the original tracks
-                if not tracks_with_features:
-                    tracks_with_features = spotify_tracks
-                
                 # Convert to SongResult objects and compute similarity scores
                 # Use sets to track seen tracks for deduplication
                 seen_track_ids = set()
                 seen_track_combos = set()  # Track (song_name, artist) combinations
                 playlist = []
                 
-                for track_data in tracks_with_features:
+                for track_data in spotify_tracks:
                     # Skip duplicates based on Spotify ID
                     track_id = track_data.get('spotify_id')
                     if track_id and track_id in seen_track_ids:
@@ -306,6 +299,41 @@ class PlaylistGenerator:
                 
                 # Sort by similarity score
                 playlist.sort(key=lambda x: x.similarity_score, reverse=True)
+                
+                # Add artist diversity: prevent artist clustering
+                # Ensure no artist has more than 2-3 tracks in the final playlist
+                if len(playlist) > num_results:
+                    final_playlist = []
+                    artist_count = {}
+                    max_per_artist = 2  # Limit tracks per artist
+                    
+                    # First pass: take high-quality diverse tracks
+                    for track in playlist:
+                        artist = track.artist.lower()
+                        
+                        # Add track if we haven't exceeded artist limit or if we need more tracks
+                        if len(final_playlist) < num_results:
+                            if artist_count.get(artist, 0) < max_per_artist:
+                                final_playlist.append(track)
+                                artist_count[artist] = artist_count.get(artist, 0) + 1
+                    
+                    # If we still need more tracks, relax the constraint slightly
+                    if len(final_playlist) < num_results:
+                        max_per_artist = 3  # Allow up to 3 per artist
+                        for track in playlist:
+                            if len(final_playlist) >= num_results:
+                                break
+                            artist = track.artist.lower()
+                            if track not in final_playlist and artist_count.get(artist, 0) < max_per_artist:
+                                final_playlist.append(track)
+                                artist_count[artist] = artist_count.get(artist, 0) + 1
+                    
+                    playlist = final_playlist
+                    unique_artists = len(set(t.artist.lower() for t in playlist))
+                    logger.info(
+                        f"Artist diversity: {len(playlist)} tracks from {unique_artists} different artists "
+                        f"(max {max_per_artist} per artist)"
+                    )
                 
                 # Optionally enrich with Genius lyrics data
                 # When enabled, this RE-RANKS using 80% lyrics + 20% embeddings
@@ -483,84 +511,127 @@ class PlaylistGenerator:
         # Map emotions to genre/characteristic queries (avoid the emotion word itself)
         emotion_query_map = {
             "happy": [
-                "genre:pop year:2015-2024",  # Recent pop is often upbeat
+                "genre:pop year:2015-2024",
                 "genre:dance",
-                "genre:funk",
-                "Dua Lipa",  # Known for upbeat pop
+                "genre:funk disco",
+                "genre:reggae",
+                "Dua Lipa",
                 "Bruno Mars",
+                "Pharrell Williams",
+                "ABBA",
+                "Earth Wind Fire",
             ],
             "sad": [
-                "genre:indie year:2010-2024",  # Indie often introspective
+                "genre:indie year:2010-2024",
                 "genre:singer-songwriter",
                 "genre:alternative acoustic",
+                "genre:soul ballad",
                 "Phoebe Bridgers",
                 "Bon Iver",
+                "Adele",
+                "Billie Eilish",
+                "Elliott Smith",
             ],
             "energetic": [
                 "genre:edm",
                 "genre:electronic",
                 "genre:rock workout",
+                "genre:punk",
+                "genre:drum and bass",
                 "The Prodigy",
                 "Daft Punk",
+                "Foo Fighters",
+                "Green Day",
             ],
             "calm": [
                 "genre:ambient",
                 "genre:acoustic instrumental",
                 "genre:jazz smooth",
+                "genre:classical piano",
                 "Norah Jones",
                 "Ludovico Einaudi",
+                "Enya",
+                "Sigur Rós",
             ],
             "angry": [
                 "genre:metal",
-                "genre:hard-rock",
-                "genre:punk",
-                "Rage Against The Machine",
-                "System Of A Down",
+                "genre:hardcore punk",
+                "genre:industrial",
+                "genre:grunge",
+                "Rage Against the Machine",
+                "Slipknot",
+                "Nine Inch Nails",
+                "Nirvana",
             ],
             "melancholic": [
                 "genre:indie folk",
-                "genre:alternative acoustic",
+                "genre:shoegaze",
+                "genre:dream pop",
                 "genre:slowcore",
-                "Sufjan Stevens",
-                "Elliott Smith",
+                "The National",
+                "Mazzy Star",
+                "Radiohead",
+                "Fleet Foxes",
             ],
             "hopeful": [
-                "genre:indie-pop uplifting",
-                "genre:alternative anthemic",
-                "genre:folk",
-                "Coldplay anthems",
-                "Florence + The Machine",
+                "genre:indie anthemic",
+                "genre:alternative uplifting",
+                "genre:folk inspirational",
+                "Coldplay",
+                "Imagine Dragons",
+                "Of Monsters and Men",
+                "Mumford & Sons",
             ],
             "romantic": [
-                "genre:r-n-b",
+                "genre:r&b love",
                 "genre:soul",
-                "genre:neo-soul",
+                "genre:jazz ballad",
+                "genre:indie romantic",
                 "Frank Ocean",
-                "H.E.R.",
+                "Sade",
+                "The Weeknd",
+                "Cigarettes After Sex",
             ],
             "anxious": [
-                "genre:alternative experimental",
+                "genre:experimental",
                 "genre:post-punk",
-                "genre:darkwave",
+                "genre:dark wave",
+                "genre:electronic tense",
                 "Radiohead",
-                "Nine Inch Nails",
+                "Portishead",
+                "Massive Attack",
+                "Trent Reznor",
             ],
             "peaceful": [
-                "genre:classical contemporary",
-                "genre:ambient meditation",
-                "genre:new-age",
-                "Ólafur Arnalds",
+                "genre:new age",
+                "genre:world meditation",
+                "genre:ambient chill",
+                "genre:lo-fi beats",
+                "Yiruma",
                 "Max Richter",
+                "Ólafur Arnalds",
+                "Bonobo",
             ],
         }
         
-        queries = emotion_query_map.get(emotion_lower, [
-            f"genre:pop",
-            f"genre:indie",
-            f"genre:alternative"
-        ])
+        # Get queries for this emotion
+        queries = emotion_query_map.get(emotion_lower, [])
         
-        logger.info(f"Generated {len(queries)} genre-based queries for emotion '{emotion}'")
+        # If emotion not in map, create generic queries
+        if not queries:
+            queries = [
+                f"genre:indie {emotion_lower}",
+                f"genre:alternative {emotion_lower}",
+                f"genre:electronic {emotion_lower}",
+            ]
+        
+        # Add some randomization to get different results each time
+        import random
+        if len(queries) > 5:
+            # Randomly select 5-7 queries to vary results
+            num_queries = random.randint(5, min(7, len(queries)))
+            queries = random.sample(queries, num_queries)
+        
         return queries
     
     def _get_genre_seeds_for_emotion(self, emotion: str) -> List[str]:

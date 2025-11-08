@@ -240,3 +240,4 @@ async def get_spotify_recommendations(
     except Exception as e:
         logger.error(f"Error getting recommendations: {e}")
         raise HTTPException(status_code=500, detail="Failed to get recommendations")
+

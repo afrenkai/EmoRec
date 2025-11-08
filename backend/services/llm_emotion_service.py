@@ -2,9 +2,20 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 import logging
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors."""
+    a_flat = a.flatten()
+    b_flat = b.flatten()
+    dot_product = np.dot(a_flat, b_flat)
+    norm_a = np.linalg.norm(a_flat)
+    norm_b = np.linalg.norm(b_flat)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
 
 
 class LLMEmotionService:
@@ -159,10 +170,7 @@ class LLMEmotionService:
         emotion_emb = self.get_emotion_embedding(target_emotion)
         
         # Compute cosine similarity
-        similarity = cosine_similarity(
-            text_emb.reshape(1, -1),
-            emotion_emb.reshape(1, -1)
-        )[0][0]
+        similarity = cosine_similarity(text_emb, emotion_emb)
         
         # Normalize to 0-1 range
         normalized = (similarity + 1) / 2
@@ -191,10 +199,7 @@ class LLMEmotionService:
             if emo_name.lower() == emotion.lower():
                 continue
             
-            sim = cosine_similarity(
-                query_emb.reshape(1, -1),
-                emo_emb.reshape(1, -1)
-            )[0][0]
+            sim = cosine_similarity(query_emb, emo_emb)
             similarities.append((emo_name, float(sim)))
         
         # Sort by similarity
@@ -266,10 +271,7 @@ class LLMEmotionService:
         for i, e1 in enumerate(emotions):
             for j, e2 in enumerate(emotions):
                 if i < j:
-                    sim = cosine_similarity(
-                        emotion_embs[i].reshape(1, -1),
-                        emotion_embs[j].reshape(1, -1)
-                    )[0][0]
+                    sim = cosine_similarity(emotion_embs[i], emotion_embs[j])
                     similarities.append((e1, e2, float(sim)))
         
         # Identify conflicts (low similarity)
@@ -285,10 +287,7 @@ class LLMEmotionService:
         best_match = None
         best_score = -1
         for emo_name, emo_emb in self.emotion_embeddings.items():
-            sim = cosine_similarity(
-                blended_emb.reshape(1, -1),
-                emo_emb.reshape(1, -1)
-            )[0][0]
+            sim = cosine_similarity(blended_emb, emo_emb)
             if sim > best_score:
                 best_score = sim
                 best_match = emo_name

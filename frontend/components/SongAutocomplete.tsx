@@ -23,7 +23,6 @@ export default function SongAutocomplete({ onSelectSong, placeholder }: SongAuto
       return;
     }
 
-    // Debounce search
     if (debounceTimer.current) {
       clearTimeout(debounceTimer.current);
     }
