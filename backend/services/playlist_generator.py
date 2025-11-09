@@ -233,25 +233,48 @@ class PlaylistGenerator:
                             seed_track_ids.append(track['spotify_id'])
             
             if seed_track_ids or songs or artists:
-                logger.info("Using LLM to generate search queries based on seed songs/artists and mood")
-                search_queries = []
+                spotify_tracks = []  # Initialize the list
+                logger.info("🎵 Song/artist-based search - using hybrid strategy (same artist + genre variety)")
                 
-                if songs or artists:
-                    if emotion:
-                        logger.info(f"Using LLM to generate queries for emotion '{emotion}' with seed context")
-                        emotion_queries = self.query_generator.generate_queries_for_emotion(
-                            emotion,
-                            num_queries=6
+                # Get tracks using hybrid approach: same artist + genre-based variety
+                # This avoids both problems: too narrow (only same artist) and keyword stuffing
+                if seed_track_ids:
+                    logger.info(f"🔍 Getting diverse tracks based on {len(seed_track_ids)} seed tracks")
+                    try:
+                        similar_tracks = self.spotify_service.get_similar_tracks_from_seeds(
+                            seed_track_ids[:5],  # Max 5 seeds
+                            limit=100  # Get many candidates for lyrics filtering
                         )
-                        search_queries.extend(emotion_queries)
-                    else:
-                        logger.info("Using LLM to infer mood from seed songs/artists and generate queries")
-                        seed_tuples = []
+                        spotify_tracks.extend(similar_tracks)
+                        logger.info(f"✓ Got {len(similar_tracks)} tracks (mix of same artist + genre variety)")
                         
-                        if songs:
-                            seed_tuples.extend([(s.song_name, s.artist) for s in songs])
+                        if len(similar_tracks) > 0:
+                            sample_tracks = [f"{t['song_name']} by {t['artist']}" for t in similar_tracks[:5]]
+                            logger.info(f"Sample tracks: {sample_tracks}")
+                    except Exception as e:
+                        logger.error(f"❌ Hybrid strategy failed: {e}", exc_info=True)
+                
+                # Only supplement with genre search if we got very few results
+                # SKIP keyword search entirely for song-based searches to avoid "melancholic" problem
+                if len(spotify_tracks) < 30:
+                    logger.warning(f"⚠️  Only got {len(spotify_tracks)} tracks from related artists")
+                    
+                    # Only use genre search if no songs were provided (pure emotion/artist search)
+                    if not songs:
+                        logger.info("📝 No seed songs provided, supplementing with genre-based search")
+                        search_queries = []
                         
-                        if artists:
+                        if emotion:
+                            logger.info(f"Using LLM to generate queries for emotion '{emotion}'")
+                            emotion_queries = self.query_generator.generate_queries_for_emotion(
+                                emotion,
+                                num_queries=6
+                            )
+                            search_queries.extend(emotion_queries)
+                        elif artists:
+                            logger.info("Inferring mood from artists and generating queries")
+                            seed_tuples = []
+                            
                             for artist in artists:
                                 artist_id = artist.spotify_id
                                 artist_name = artist.artist_name
@@ -262,7 +285,6 @@ class PlaylistGenerator:
                                         artist_name = artist_results[0]['name']
                                 
                                 if artist_id:
-                                    # Use tracks including collabs to better represent artist style
                                     artist_tracks = self.spotify_service.get_artist_tracks_including_collabs(
                                         artist_id, 
                                         artist_name, 
@@ -270,40 +292,57 @@ class PlaylistGenerator:
                                     )
                                     for track in artist_tracks[:2]:
                                         seed_tuples.append((track['song_name'], track['artist']))
+                            
+                            if seed_tuples:
+                                seed_queries = self.query_generator.generate_queries_for_seed_songs(
+                                    seed_tuples,
+                                    num_queries=7
+                                )
+                                search_queries.extend(seed_queries)
                         
-                        inferred_emotions = self.query_generator.infer_emotion_from_seeds(
-                            seed_tuples,
-                            top_k=2
-                        )
-                        if inferred_emotions:
-                            logger.info(f"LLM inferred moods: {inferred_emotions}")
-                        
-                        seed_queries = self.query_generator.generate_queries_for_seed_songs(
-                            seed_tuples,
-                            num_queries=7
-                        )
-                        search_queries.extend(seed_queries)
-                
-                spotify_tracks = self.spotify_service.search_by_multiple_queries(
-                    queries=search_queries,
-                    limit_per_query=25  # Increased to get more candidates for embedding matching
-                )
+                        if search_queries:
+                            additional_tracks = self.spotify_service.search_by_multiple_queries(
+                                queries=search_queries,
+                                limit_per_query=15
+                            )
+                            spotify_tracks.extend(additional_tracks)
+                            logger.info(f"Added {len(additional_tracks)} tracks from genre search")
+                    else:
+                        logger.info("🚫 Skipping genre search for song-based query to avoid keyword matching")
                 
             elif emotion:
-                logger.info(f"Using LLM to generate GENRE queries for emotion: '{emotion}' (semantic matching happens AFTER)")
+                logger.info(f"🎭 Emotion-based search for: '{emotion}' - getting popular tracks for lyrics analysis")
                 
-                emotion_queries = self.query_generator.generate_queries_for_emotion(
-                    emotion,
-                    num_queries=8,
-                    include_year=True,
-                    use_runtime_filtering=True  # Enable runtime corpus filtering
-                )
+                # Since genre APIs are deprecated and text search causes keyword matching,
+                # use a different strategy: Get popular tracks from recent years across styles,
+                # then let lyrics semantic analysis do ALL the filtering
                 
-                logger.info(f"Using runtime-filtered genre queries: {emotion_queries[:3]}...")
+                # Get diverse popular music WITHOUT emotion keywords
+                year_ranges = [
+                    'year:2020-2024',
+                    'year:2015-2019', 
+                    'year:2010-2014',
+                    'year:2005-2009',
+                ]
+                
+                # Add broad style terms (NOT emotion-related to avoid keyword bias)
+                style_searches = [
+                    'a',  # Common letter - gets popular songs
+                    'the',  # Common word - gets popular songs
+                    'love',  # Common theme - gets variety
+                    'life',  # Common theme - gets variety
+                ]
+                
+                # Combine for diversity
+                all_queries = year_ranges + style_searches[:2]
+                
+                logger.info(f"Getting popular tracks from {len(all_queries)} diverse searches (NO emotion keywords to avoid bias)")
                 spotify_tracks = self.spotify_service.search_by_multiple_queries(
-                    queries=emotion_queries,
-                    limit_per_query=30
+                    queries=all_queries,
+                    limit_per_query=40  # Get many candidates since we're not filtering by genre
                 )
+                
+                logger.info(f"Got {len(spotify_tracks)} popular tracks for lyrics-based emotional filtering")
             else:
                 spotify_tracks = []
             
@@ -439,14 +478,26 @@ class PlaylistGenerator:
                         f"(max {max_per_artist} per artist)"
                     )
                 
-                # Get more candidates before lyrics filtering
+                # Enrich with lyrics as additional context for better embeddings
                 if enrich_with_lyrics and self.genius_service and self.genius_service.is_available():
                     primary_emotion = emotion.split()[0] if emotion else None
-                    # Get 3x the needed results for lyrics filtering
+                    
+                    # For emotion-based search, we need MORE candidates because lyrics matching is crucial
+                    # For song-based search, we already have good candidates from same artist/genre
+                    if emotion and not songs:
+                        # Emotion-only search: Get 6x candidates for aggressive lyrics filtering
+                        candidate_multiplier = 6
+                        logger.info(f"🎭 Emotion search: Fetching lyrics for {num_results * candidate_multiplier} candidates for semantic analysis")
+                    else:
+                        # Song/artist-based: 4x is enough
+                        candidate_multiplier = 4
+                        logger.info(f"🎵 Song search: Fetching lyrics for {num_results * candidate_multiplier} candidates")
+                    
                     playlist = self._enrich_with_genius_data(
-                        playlist[:num_results * 3], 
+                        playlist[:num_results * candidate_multiplier], 
                         primary_emotion,
-                        filter_threshold=0.3  # Filter out songs with low lyric match
+                        seed_songs=songs,
+                        seed_artists=artists
                     )
                 
                 logger.info(f"Generated Spotify playlist with {len(playlist)} songs")
@@ -509,109 +560,302 @@ class PlaylistGenerator:
         self, 
         playlist: List[SongResult], 
         target_emotion: Optional[str] = None,
-        filter_threshold: float = 0.0
+        filter_threshold: float = 0.0,
+        seed_songs: Optional[List[SongInput]] = None,
+        seed_artists: Optional[List[ArtistInput]] = None
     ) -> List[SongResult]:
         """
-        Enrich playlist with Genius lyrics emotional analysis and RE-RANK by lyrics score.
+        Enrich playlist by comparing actual song lyrics content.
         
-        This is the primary ranking mechanism - lyrics emotion > embeddings.
-        Now also FILTERS OUT songs that don't match the mood based on lyrics.
+        Two modes:
+        1. Song/Artist-based: Compare candidate lyrics to SEED song lyrics
+        2. Mood-based: Compare candidate lyrics to each other to find cohesive theme
         
         Args:
-            playlist: List of SongResult objects
-            target_emotion: The emotion we're matching against
-            filter_threshold: Minimum lyrics score to keep song (0.0-1.0)
+            playlist: List of SongResult objects (candidates)
+            target_emotion: Emotion for mood-based search
+            seed_songs: Seed songs for song-based search
+            seed_artists: Seed artists for artist-based search
             
         Returns:
-            Re-ranked and filtered playlist based primarily on lyrics emotional match
+            Re-ranked playlist based on lyrical similarity
         """
         if not self.genius_service or not self.genius_service.is_available():
-            logger.info("Genius service not available, using embedding-only ranking")
+            logger.info("Genius service not available, using title-only embeddings")
             return playlist
         
         try:
-            songs_to_search = [(song.song_name, song.artist) for song in playlist]
+            # Determine if this is song/artist-based or mood-based search
+            has_seeds = (seed_songs and len(seed_songs) > 0) or (seed_artists and len(seed_artists) > 0)
             
-            logger.info(f"Fetching lyrics for {len(songs_to_search)} songs to analyze true mood...")
-            genius_results = self.genius_service.batch_get_emotional_profiles_sync(
-                songs_to_search,
-                target_emotion=target_emotion,
-                max_concurrent=5  # Increased for faster processing
-            )
-            
-            lyrics_scored_count = 0
-            filtered_count = 0
-            
-            for song in playlist:
-                key = f"{song.song_name}|{song.artist}"
-                if key in genius_results and genius_results[key]:
-                    genius_data = genius_results[key]
-                    
-                    song.genius_url = genius_data.get('genius_url')
-                    
-                    lyrics_score = genius_data.get('emotion_match_score', 0.0)
-                    dominant_emotion = genius_data.get('dominant_emotion')
-                    emotional_keywords = genius_data.get('emotional_keywords', {})
-                    
-                    # Store lyrics metadata for debugging
-                    song.lyrics_emotion = dominant_emotion
-                    song.lyrics_score = lyrics_score
-                    
-                    if lyrics_score > 0:
-                        original_embedding_score = song.similarity_score
-                        
-                        # More aggressive weighting: 85% lyrics, 15% embeddings
-                        # Lyrics are the ground truth for mood!
-                        song.similarity_score = (
-                            lyrics_score * 0.85 +
-                            original_embedding_score * 0.15
-                        )
-                        
-                        # Additional boost if dominant emotion matches target
-                        if target_emotion and dominant_emotion:
-                            if dominant_emotion == target_emotion.lower():
-                                song.similarity_score += 0.1
-                                logger.debug(f"Boosted {song.song_name} - dominant emotion matches!")
-                        
-                        lyrics_scored_count += 1
-                        
-                        logger.debug(
-                            f"{song.song_name}: lyrics={lyrics_score:.3f} (mood: {dominant_emotion}), "
-                            f"embedding={original_embedding_score:.3f}, "
-                            f"final={song.similarity_score:.3f}, "
-                            f"keywords={list(emotional_keywords.keys())[:3]}"
-                        )
-                    else:
-                        # No lyrics match - penalize heavily
-                        song.similarity_score *= 0.5
-                        logger.debug(f"{song.song_name}: No lyrics emotional match - penalized")
-            
-            # FILTER out songs below threshold (mood mismatch)
-            if filter_threshold > 0.0:
-                original_length = len(playlist)
-                playlist = [
-                    song for song in playlist 
-                    if hasattr(song, 'lyrics_score') and song.lyrics_score >= filter_threshold
-                    or not hasattr(song, 'lyrics_score')  # Keep songs without lyrics data
-                ]
-                filtered_count = original_length - len(playlist)
-                
-                if filtered_count > 0:
-                    logger.info(
-                        f"Filtered out {filtered_count} songs with low lyrics match "
-                        f"(threshold={filter_threshold})"
-                    )
-            
-            # Re-rank after scoring
-            playlist.sort(key=lambda x: x.similarity_score, reverse=True)
-            
-            logger.info(
-                f"Re-ranked playlist with lyrics analysis: {lyrics_scored_count}/{len(songs_to_search)} "
-                f"songs scored (85% lyrics, 15% embeddings), {filtered_count} filtered out"
-            )
+            if has_seeds:
+                # Song/Artist-based: Compare to seed lyrics
+                return self._enrich_with_seed_lyrics(playlist, seed_songs, seed_artists)
+            else:
+                # Mood-based: Compare candidates to emotion target
+                return self._enrich_with_mood_lyrics(playlist, target_emotion)
             
         except Exception as e:
-            logger.warning(f"Could not enrich with Genius data: {e}", exc_info=True)
+            logger.warning(f"Could not enrich with lyrics: {e}", exc_info=True)
+        
+        return playlist
+    
+    def _enrich_with_seed_lyrics(
+        self,
+        playlist: List[SongResult],
+        seed_songs: Optional[List[SongInput]],
+        seed_artists: Optional[List[ArtistInput]]
+    ) -> List[SongResult]:
+        """Compare candidate lyrics to SEED song lyrics."""
+        
+        # First, get lyrics for seed songs
+        seed_tuples = []
+        if seed_songs:
+            seed_tuples.extend([(s.song_name, s.artist) for s in seed_songs])
+        
+        # For artists, get their top tracks
+        if seed_artists and self.spotify_service:
+            for artist in seed_artists:
+                artist_id = artist.spotify_id
+                artist_name = artist.artist_name
+                if not artist_id:
+                    artist_results = self.spotify_service.search_artist(artist.artist_name, limit=1)
+                    if artist_results:
+                        artist_id = artist_results[0]['spotify_id']
+                        artist_name = artist_results[0]['name']
+                
+                if artist_id:
+                    artist_tracks = self.spotify_service.get_artist_tracks_including_collabs(
+                        artist_id, artist_name, limit=3
+                    )
+                    for track in artist_tracks[:2]:
+                        seed_tuples.append((track['song_name'], track['artist']))
+        
+        if not seed_tuples:
+            logger.info("No seed songs to compare lyrics against")
+            return playlist
+        
+        logger.info(f"Fetching lyrics for {len(seed_tuples)} SEED songs...")
+        seed_genius_results = self.genius_service.batch_get_lyrics_sync(
+            seed_tuples,
+            max_concurrent=5
+        )
+        
+        # Create embeddings from seed lyrics
+        seed_lyrics_embeddings = []
+        for song_name, artist in seed_tuples:
+            key = f"{song_name}|{artist}"
+            if key in seed_genius_results and seed_genius_results[key]:
+                lyrics = seed_genius_results[key].get('lyrics')
+                if lyrics:
+                    lyrics_emb = self.embedding_service.encode_text(lyrics[:2000])
+                    seed_lyrics_embeddings.append(lyrics_emb)
+        
+        if not seed_lyrics_embeddings:
+            logger.warning(
+                f"⚠️  Could not fetch lyrics for ANY seed songs! "
+                f"Tried: {[f'{s}|{a}' for s, a in seed_tuples]}"
+            )
+            logger.warning("Falling back to title-based matching only")
+            return playlist
+        
+        # Create target profile from seed lyrics
+        target_profile = np.mean(seed_lyrics_embeddings, axis=0)
+        target_profile = target_profile / np.linalg.norm(target_profile)
+        
+        logger.info(f"Created target profile from {len(seed_lyrics_embeddings)} seed song lyrics")
+        
+        # Now get lyrics for candidate songs
+        candidate_tuples = [(song.song_name, song.artist) for song in playlist]
+        logger.info(f"Fetching lyrics for {len(candidate_tuples)} candidate songs...")
+        
+        candidate_genius_results = self.genius_service.batch_get_lyrics_sync(
+            candidate_tuples,
+            max_concurrent=5
+        )
+        
+        # Re-score candidates based on lyrics similarity to seed profile
+        lyrics_scored = 0
+        no_lyrics_count = 0
+        
+        for song in playlist:
+            key = f"{song.song_name}|{song.artist}"
+            if key in candidate_genius_results and candidate_genius_results[key]:
+                genius_data = candidate_genius_results[key]
+                
+                song.genius_url = genius_data.get('genius_url')
+                lyrics = genius_data.get('lyrics')
+                
+                if lyrics:
+                    original_score = song.similarity_score
+                    
+                    # Compare candidate lyrics to seed profile
+                    candidate_lyrics_emb = self.embedding_service.encode_text(lyrics[:2000])
+                    lyrics_similarity = float(
+                        self.embedding_service.compute_similarity(
+                            target_profile,
+                            candidate_lyrics_emb
+                        )
+                    )
+                    
+                    # Blend: 80% lyrics content, 20% original
+                    song.similarity_score = lyrics_similarity * 0.8 + original_score * 0.2
+                    lyrics_scored += 1
+                    
+                    logger.debug(
+                        f"✓ {song.song_name}: title={original_score:.3f}, "
+                        f"lyrics_vs_seeds={lyrics_similarity:.3f}, "
+                        f"blended={song.similarity_score:.3f}"
+                    )
+                else:
+                    no_lyrics_count += 1
+            else:
+                no_lyrics_count += 1
+        
+        # Re-sort by new scores
+        playlist.sort(key=lambda x: x.similarity_score, reverse=True)
+        
+        logger.info(
+            f"✓ Re-ranked by comparing to SEED lyrics: {lyrics_scored}/{len(candidate_tuples)} "
+            f"candidates had lyrics ({no_lyrics_count} had no lyrics), "
+            f"using 80% lyrics + 20% title weighting"
+        )
+        
+        if lyrics_scored == 0:
+            logger.warning("⚠️  No candidates had lyrics! Keeping title-based ranking only")
+        
+        return playlist
+    
+    def _enrich_with_mood_lyrics(
+        self, 
+        playlist: List[SongResult],
+        target_emotion: Optional[str] = None
+    ) -> List[SongResult]:
+        """
+        Compare candidate lyrics semantically to the target emotion.
+        
+        Instead of averaging candidates, we create an emotion-based semantic target
+        and compare each song's lyrics to it. This gives much better results for
+        emotion-based searches.
+        """
+        
+        songs_to_search = [(song.song_name, song.artist) for song in playlist]
+        
+        logger.info(f"🎭 Fetching lyrics for {len(songs_to_search)} songs for emotional semantic analysis...")
+        genius_results = self.genius_service.batch_get_lyrics_sync(
+            songs_to_search,
+            max_concurrent=5
+        )
+        
+        # Store lyrics-based embeddings
+        lyrics_embeddings = {}
+        lyrics_found = 0
+        
+        for song in playlist:
+            key = f"{song.song_name}|{song.artist}"
+            if key in genius_results and genius_results[key]:
+                genius_data = genius_results[key]
+                
+                song.genius_url = genius_data.get('genius_url')
+                lyrics = genius_data.get('lyrics')
+                
+                if lyrics:
+                    # Create embedding from lyrics content only
+                    lyrics_embedding = self.embedding_service.encode_text(lyrics[:2000])
+                    lyrics_embeddings[key] = lyrics_embedding
+                    lyrics_found += 1
+        
+        if not lyrics_embeddings:
+            logger.warning("⚠️  No lyrics found for mood search, keeping original ranking")
+            return playlist
+        
+        logger.info(f"✓ Found lyrics for {lyrics_found}/{len(songs_to_search)} songs")
+        
+        # Create semantic target based on the emotion
+        if target_emotion:
+            # Create a rich semantic representation of the emotion
+            emotion_context = f"""
+            Songs about {target_emotion}. 
+            Music that captures the feeling of {target_emotion}.
+            Lyrics expressing {target_emotion} emotions and themes.
+            The mood and atmosphere of {target_emotion}.
+            """
+            emotion_embedding = self.embedding_service.encode_text(emotion_context)
+            emotion_embedding = emotion_embedding / np.linalg.norm(emotion_embedding)
+            
+            logger.info(f"🎯 Created semantic target for emotion: '{target_emotion}'")
+            
+            # Also create a collective mood profile for secondary ranking
+            all_lyrics_embs = list(lyrics_embeddings.values())
+            collective_profile = np.mean(all_lyrics_embs, axis=0)
+            collective_profile = collective_profile / np.linalg.norm(collective_profile)
+            
+            # Re-score based on BOTH emotion target AND collective coherence
+            scored_count = 0
+            for song in playlist:
+                key = f"{song.song_name}|{song.artist}"
+                if key in lyrics_embeddings:
+                    original_score = song.similarity_score
+                    
+                    # Compare lyrics to emotion target
+                    emotion_similarity = float(
+                        self.embedding_service.compute_similarity(
+                            emotion_embedding,
+                            lyrics_embeddings[key]
+                        )
+                    )
+                    
+                    # Compare lyrics to collective mood (for coherence)
+                    collective_similarity = float(
+                        self.embedding_service.compute_similarity(
+                            collective_profile,
+                            lyrics_embeddings[key]
+                        )
+                    )
+                    
+                    # Weighted combination: 70% emotion match, 20% collective coherence, 10% original title
+                    song.similarity_score = (
+                        emotion_similarity * 0.70 +
+                        collective_similarity * 0.20 +
+                        original_score * 0.10
+                    )
+                    
+                    scored_count += 1
+                    logger.debug(
+                        f"✓ {song.song_name}: emotion={emotion_similarity:.3f}, "
+                        f"coherence={collective_similarity:.3f}, "
+                        f"final={song.similarity_score:.3f}"
+                    )
+        else:
+            # No emotion specified - use collective coherence only
+            all_lyrics_embs = list(lyrics_embeddings.values())
+            target_lyrics_profile = np.mean(all_lyrics_embs, axis=0)
+            target_lyrics_profile = target_lyrics_profile / np.linalg.norm(target_lyrics_profile)
+            
+            logger.info(f"Created collective mood profile from {len(all_lyrics_embs)} songs")
+            
+            scored_count = 0
+            for song in playlist:
+                key = f"{song.song_name}|{song.artist}"
+                if key in lyrics_embeddings:
+                    original_score = song.similarity_score
+                    
+                    lyrics_similarity = float(
+                        self.embedding_service.compute_similarity(
+                            target_lyrics_profile,
+                            lyrics_embeddings[key]
+                        )
+                    )
+                    
+                    song.similarity_score = lyrics_similarity * 0.80 + original_score * 0.20
+                    scored_count += 1
+        
+        # Re-sort by new scores
+        playlist.sort(key=lambda x: x.similarity_score, reverse=True)
+        
+        logger.info(
+            f"✓ Re-ranked by lyrical semantic analysis: {scored_count}/{len(songs_to_search)} songs analyzed"
+        )
         
         return playlist
     
