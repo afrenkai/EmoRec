@@ -20,10 +20,6 @@ async def get_audio(request: Request):
     from fastapi.responses import StreamingResponse
     import asyncio
 
-    genius_service = getattr(request.app.state, 'genius_service', None)
-    if not genius_service:
-        raise HTTPException(status_code=503, detail="Genius service is not available")
-
     song_title = request.query_params.get("song_title")
     logger.info(f"Requested song_title: {song_title}")
     artist_name = request.query_params.get("artist_name")
@@ -33,19 +29,14 @@ async def get_audio(request: Request):
     async def stream_ytdlp():
         import subprocess
         query = f"ytsearch:{song_title} By {artist_name}"
-
-        cmd = ["yt-dlp", "--get-id", query]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        video_id = result.stdout.strip()
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        logger.info(f"Resolved YouTube URL: {youtube_url}")
         args = [
             "yt-dlp",
+            query,
             "-f", "bestaudio",
+            "--hls-use-mpegts",
             "-o", "-",
             "--no-playlist",
             "--no-warnings",
-            youtube_url
         ]
         proc = subprocess.Popen(
             args,
