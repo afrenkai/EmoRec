@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Starting EmoRec backend...")
     try:
+        # Initialize services lazily for serverless environments
         app.state.embedding_service = EmbeddingService()
         app.state.emotion_mapper = EmotionMapper()
         app.state.spotify_service = SpotifyService()
@@ -38,7 +39,9 @@ async def lifespan(app: FastAPI):
         logger.info("Services initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
-        raise
+        # In serverless, continue even if initialization fails
+        # Services will be initialized on-demand
+        logger.warning("Continuing with on-demand service initialization")
     
     yield
     

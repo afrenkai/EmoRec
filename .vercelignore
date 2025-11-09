@@ -1,0 +1,45 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+
+# Environment
+.env
+.env.local
+.venv
+venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend (if deploying separately)
+frontend/node_modules
+frontend/.next
+frontend/out
+
+# Tests
+tests/
+pytest.ini
+run_tests.sh
+
+# Development files
+run.py
+README.md
